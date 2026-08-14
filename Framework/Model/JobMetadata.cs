@@ -6,4 +6,5 @@ public record JobMetadata : IJobMetadata
 {
     public DateTimeOffset? NextFireTimeUtc { get; init; }
     public DateTimeOffset? PreviousFireTimeUtc { get; init; }
+    public TimeSpan? PreviousRunDuration { get; init; }
 }

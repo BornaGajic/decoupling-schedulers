@@ -2,10 +2,10 @@
 
 namespace Framework.Test;
 
-public class FailTestJob : IJob
+public class ThreeSecondDelayJob : IJob
 {
     public Task Execute(IJobContext context)
     {
-        throw new Exception("Test should fail.");
+        return Task.Delay(3000);
     }
 }

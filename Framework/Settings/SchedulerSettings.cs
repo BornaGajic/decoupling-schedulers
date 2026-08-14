@@ -13,6 +13,8 @@ namespace Framework.Settings
 
         public SchedulingProvider Provider { get; init; }
         public string TimeZoneId { get; init; } = "Local";
+        public bool UsePersistentStore { get; init; }
+        public string DbConnectionString { get; init; }
 
         public TimeZoneInfo TimeZone => TimeZoneId switch
         {

@@ -5,24 +5,23 @@ namespace Framework.Test
 {
     public class SchedulerTestBase : TestSetup
     {
-        static SchedulerTestBase()
+        public SchedulerTestBase()
         {
             var configuration = SetupConfiguration();
             Container = SetupContainer(svc =>
             {
                 svc.RegisterScheduler(configuration);
-
-                svc.AddKeyedSingleton<TaskCompletionSource>(nameof(TestJob));
-                svc.AddKeyedSingleton<TaskCompletionSource>(nameof(FailTestJob));
-
                 svc.AddTransient<TestJob>();
                 svc.AddTransient<FailTestJob>();
+                svc.AddTransient<TestFailJobState>();
+                svc.AddTransient<ThreeSecondDelayJob>();
             });
 
             Scheduler = Container.GetRequiredService<IScheduler>();
         }
 
-        public static IServiceProvider Container { get; private set; }
-        public static IScheduler Scheduler { get; private set; }
+        public IServiceProvider Container { get; private set; }
+
+        public IScheduler Scheduler { get; private set; }
     }
 }

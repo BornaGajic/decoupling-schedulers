@@ -1,6 +1,6 @@
 ﻿namespace Framework.Model;
 
-public enum JobState
+public enum JobTriggerState
 {
     /// <summary>
     /// Indicates that the trigger is in the "normal" state.

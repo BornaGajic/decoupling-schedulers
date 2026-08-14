@@ -4,6 +4,7 @@ using Framework.Settings;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Quartz;
 
@@ -42,13 +43,34 @@ namespace Framework.Registration
         private static IServiceCollection RegisterSchedulerServices<TSettings>(this IServiceCollection services, IConfiguration configuration)
             where TSettings : SchedulerSettings, IConfigurationSetting
         {
+            //**//
+            services.AddLogging(cfg => cfg.AddConsole());
+            //**//
+
             var settings = configuration.GetRequiredSection(TSettings.ConfigurationKey).Get<TSettings>();
 
             if (settings.Provider is SchedulingProvider.Quartz)
             {
                 services.AddQuartz(cfg =>
                 {
-                    cfg.UseInMemoryStore();
+                    if (settings.UsePersistentStore)
+                    {
+                        cfg.UsePersistentStore(st =>
+                        {
+                            st.UseProperties = true;
+                            st.UseNewtonsoftJsonSerializer();
+                            st.UseSqlServer(opt =>
+                            {
+                                opt.TablePrefix = "[Quartz].";
+                                opt.ConnectionString = settings.DbConnectionString;
+                            });
+                        });
+                    }
+                    else
+                    {
+                        cfg.UseInMemoryStore();
+                    }
+
                     cfg.UseJobFactory<QuartzJobFactory>();
                     cfg.UseTimeZoneConverter();
                 });
@@ -60,6 +82,8 @@ namespace Framework.Registration
                     SchedulingProvider.Quartz => svc.GetRequiredService<QuartzScheduler>(),
                     _ => throw new Exception($"Unknown {nameof(SchedulingProvider)}")
                 });
+
+                return services;
             }
 
             return services;

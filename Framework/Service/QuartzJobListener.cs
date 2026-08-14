@@ -1,57 +1,61 @@
-﻿using Framework.Model;
+﻿using Framework.Common;
+using Framework.Model;
 using Quartz;
 
-namespace Framework.Service
+namespace Framework.Service;
+
+internal class QuartzJobListener : IJobListener
 {
-    internal class QuartzJobListener : IJobListener
+    public QuartzJobListener(SchedulerEventHandler onJobExecution)
     {
-        public QuartzJobListener(Action<SchedulerEventArgs> onJobExecution)
+        OnJobExecution = onJobExecution;
+    }
+
+    public string Name => nameof(QuartzJobListener);
+    protected SchedulerEventHandler OnJobExecution { get; }
+
+    public Task JobExecutionVetoed(IJobExecutionContext context, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+    public Task JobToBeExecuted(IJobExecutionContext context, CancellationToken cancellationToken = default)
+    {
+        try
         {
-            OnJobExecution = onJobExecution;
+            OnJobExecution(new SchedulerEventArgs
+            {
+                ExecutionTime = TimeSpan.Zero,
+                PreviousFireTimeUtc = context.PreviousFireTimeUtc,
+                NextFireTimeUtc = context.NextFireTimeUtc,
+                JobKey = context.JobDetail.Key.Name,
+                EventType = SchedulerEventType.BeforeExecution
+            });
+        }
+        catch
+        {
+            // this method must not throw
         }
 
-        public string Name => nameof(QuartzJobListener);
-        protected Action<SchedulerEventArgs> OnJobExecution { get; }
+        return Task.CompletedTask;
+    }
 
-        public Task JobExecutionVetoed(IJobExecutionContext context, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public Task JobToBeExecuted(IJobExecutionContext context, CancellationToken cancellationToken = default)
+    public Task JobWasExecuted(IJobExecutionContext context, JobExecutionException jobException, CancellationToken cancellationToken = default)
+    {
+        try
         {
-            try
+            OnJobExecution(new SchedulerEventArgs
             {
-                OnJobExecution(new SchedulerEventArgs
-                {
-                    ExecutionTime = context.FireTimeUtc,
-                    JobKey = context.JobDetail.Key.ToString(),
-                    Timeline = SchedulerExecutionTimeline.BeforeExecution
-                });
-            }
-            catch
-            {
-                // this method must not throw
-            }
-
-            return Task.CompletedTask;
+                ExecutionTime = DateTime.UtcNow - context.FireTimeUtc,
+                PreviousFireTimeUtc = context.FireTimeUtc,
+                NextFireTimeUtc = context.NextFireTimeUtc,
+                JobKey = context.JobDetail.Key.Name,
+                EventType = SchedulerEventType.AfterExecution,
+                Exception = jobException
+            });
+        }
+        catch
+        {
+            // this method must not throw
         }
 
-        public Task JobWasExecuted(IJobExecutionContext context, JobExecutionException jobException, CancellationToken cancellationToken = default)
-        {
-            try
-            {
-                OnJobExecution(new SchedulerEventArgs
-                {
-                    ExecutionTime = context.FireTimeUtc,
-                    JobKey = context.JobDetail.Key.ToString(),
-                    Timeline = SchedulerExecutionTimeline.BeforeExecution,
-                    Exception = jobException?.InnerException
-                });
-            }
-            catch
-            {
-                // this method must not throw
-            }
-
-            return Task.CompletedTask;
-        }
+        return Task.CompletedTask;
     }
 }

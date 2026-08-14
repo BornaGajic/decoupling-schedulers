@@ -1,40 +1,57 @@
-﻿using Framework.Common;
-using Framework.Model;
-using Microsoft.Extensions.DependencyInjection;
+﻿using Framework.Model;
+using Microsoft.Extensions.Logging;
+using System.Runtime.ExceptionServices;
 using Quartz;
 
-namespace Framework
+namespace Framework;
+
+internal class QuartzJobAdapter<TJob> : IJob
+    where TJob : Common.IJob
 {
-    /// <summary>
-    /// See: Framework.Service.QuartzJobFactory
-    /// </summary>
-    [DisallowConcurrentExecution]
-    internal class QuartzJobAdapter<TJob> : IJobAdapter, Quartz.IJob
-        where TJob : Common.IJob
+    private readonly TJob _job;
+    private readonly ILogger _logger;
+
+    public QuartzJobAdapter(TJob job, ILogger<QuartzJobAdapter<TJob>> logger)
     {
-        private readonly TJob _job;
+        _job = job;
+        _logger = logger;
+    }
 
-        [ActivatorUtilitiesConstructor]
-        public QuartzJobAdapter(TJob job)
-        {
-            _job = job;
-        }
+    public async Task Execute(IJobExecutionContext context)
+    {
+        ExceptionDispatchInfo edi = null;
 
-        public async Task Execute(IJobExecutionContext context)
+        var jobData = JobData.From(context.JobDetail.JobDataMap);
+        var jobDisplayName = JobHeaderAttribute.KeyFor<TJob>();
+
+        _logger.LogInformation("{JobName} ({JobType}) - Starting...", jobDisplayName, typeof(TJob).Name);
+
+        try
         {
-            try
+            await _job.Execute(new JobContext
             {
-                await _job.Execute(new JobContext
-                {
-                    CancellationToken = context.CancellationToken,
-                    NextFireTimeUtc = context.NextFireTimeUtc,
-                    PreviousFireTimeUtc = context.PreviousFireTimeUtc
-                });
-            }
-            catch (Exception ex)
-            {
-                throw new JobExecutionException(ex);
-            }
+                CancellationToken = context.CancellationToken,
+                NextFireTimeUtc = context.NextFireTimeUtc,
+                PreviousFireTimeUtc = context.PreviousFireTimeUtc
+            });
         }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error occured in {JobName} ({JobType})", jobDisplayName, typeof(TJob).Name);
+            edi = ExceptionDispatchInfo.Capture(ex);
+            jobData = jobData with { LastError = ex.Message };
+        }
+        finally
+        {
+            jobData = jobData with
+            {
+                Duration = DateTime.UtcNow - context.FireTimeUtc,
+                LastRunUtc = context.FireTimeUtc.UtcDateTime,
+            };
+            jobData.PopulateJobDataMap(context.JobDetail.JobDataMap);
+        }
+        _logger.LogInformation("{JobName} ({JobType}) - Finished in {JobRunTime}", jobDisplayName, typeof(TJob).Name, context.JobRunTime);
+
+        edi?.Throw();
     }
 }
