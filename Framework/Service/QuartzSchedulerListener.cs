@@ -4,6 +4,9 @@ using Quartz;
 
 namespace Framework.Service;
 
+/// <remarks>
+/// Every <see cref="ISchedulerListener"/> member has a no-op default, so only the notifications we forward are implemented.
+/// </remarks>
 internal sealed class QuartzSchedulerListener : ISchedulerListener
 {
     public QuartzSchedulerListener(SchedulerEventHandler onJobEvent)
@@ -15,11 +18,7 @@ internal sealed class QuartzSchedulerListener : ISchedulerListener
 
     private SchedulerEventHandler OnJobEvent { get; }
 
-    public Task JobAdded(IJobDetail jobDetail, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public Task JobDeleted(JobKey jobKey, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public async Task JobInterrupted(JobKey jobKey, CancellationToken cancellationToken = default)
+    public async ValueTask JobInterrupted(Quartz.IScheduler scheduler, JobKey jobKey, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -36,7 +35,7 @@ internal sealed class QuartzSchedulerListener : ISchedulerListener
         }
     }
 
-    public async Task JobPaused(JobKey jobKey, CancellationToken cancellationToken = default)
+    public async ValueTask JobPaused(Quartz.IScheduler scheduler, JobKey jobKey, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -53,7 +52,7 @@ internal sealed class QuartzSchedulerListener : ISchedulerListener
         }
     }
 
-    public async Task JobResumed(JobKey jobKey, CancellationToken cancellationToken = default)
+    public async ValueTask JobResumed(Quartz.IScheduler scheduler, JobKey jobKey, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -70,15 +69,7 @@ internal sealed class QuartzSchedulerListener : ISchedulerListener
         }
     }
 
-    public Task JobScheduled(ITrigger trigger, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public Task JobsPaused(string jobGroup, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public Task JobsResumed(string jobGroup, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public Task JobUnscheduled(TriggerKey triggerKey, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public async Task SchedulerError(string msg, SchedulerException cause, CancellationToken cancellationToken = default)
+    public async ValueTask SchedulerError(Quartz.IScheduler scheduler, SchedulerErrorContext context, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -87,8 +78,8 @@ internal sealed class QuartzSchedulerListener : ISchedulerListener
                 ExecutionTime = TimeSpan.Zero,
                 JobKey = string.Empty,
                 EventType = SchedulerEventType.Error,
-                Exception = cause,
-                Message = msg
+                Exception = context.Exception,
+                Message = context.Message
             });
         }
         catch
@@ -96,26 +87,4 @@ internal sealed class QuartzSchedulerListener : ISchedulerListener
             // this method must not throw
         }
     }
-
-    public Task SchedulerInStandbyMode(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public Task SchedulerShutdown(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public Task SchedulerShuttingdown(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public Task SchedulerStarted(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public Task SchedulerStarting(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public Task SchedulingDataCleared(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public Task TriggerFinalized(ITrigger trigger, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public Task TriggerPaused(TriggerKey triggerKey, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public Task TriggerResumed(TriggerKey triggerKey, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public Task TriggersPaused(string triggerGroup, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public Task TriggersResumed(string triggerGroup, CancellationToken cancellationToken = default) => Task.CompletedTask;
 }

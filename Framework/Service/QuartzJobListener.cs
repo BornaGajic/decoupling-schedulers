@@ -14,9 +14,9 @@ internal class QuartzJobListener : IJobListener
     public string Name => nameof(QuartzJobListener);
     protected SchedulerEventHandler OnJobExecution { get; }
 
-    public Task JobExecutionVetoed(IJobExecutionContext context, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    public ValueTask JobExecutionVetoed(IJobExecutionContext context, CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
 
-    public Task JobToBeExecuted(IJobExecutionContext context, CancellationToken cancellationToken = default)
+    public ValueTask JobToBeExecuted(IJobExecutionContext context, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -34,10 +34,10 @@ internal class QuartzJobListener : IJobListener
             // this method must not throw
         }
 
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 
-    public Task JobWasExecuted(IJobExecutionContext context, JobExecutionException jobException, CancellationToken cancellationToken = default)
+    public ValueTask JobWasExecuted(IJobExecutionContext context, JobExecutionException jobException, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -56,6 +56,6 @@ internal class QuartzJobListener : IJobListener
             // this method must not throw
         }
 
-        return Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 }

@@ -17,7 +17,7 @@ internal class QuartzJobAdapter<TJob> : IJob
         _logger = logger;
     }
 
-    public async Task Execute(IJobExecutionContext context)
+    public async ValueTask Execute(IJobExecutionContext context, CancellationToken cancellationToken = default)
     {
         ExceptionDispatchInfo edi = null;
 
@@ -30,7 +30,7 @@ internal class QuartzJobAdapter<TJob> : IJob
         {
             await _job.Execute(new JobContext
             {
-                CancellationToken = context.CancellationToken,
+                CancellationToken = cancellationToken,
                 NextFireTimeUtc = context.NextFireTimeUtc,
                 PreviousFireTimeUtc = context.PreviousFireTimeUtc
             });

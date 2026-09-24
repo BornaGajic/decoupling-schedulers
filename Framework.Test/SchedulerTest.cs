@@ -29,6 +29,7 @@ public class SchedulerTest : SchedulerTestBase
 
         string.IsNullOrEmpty(msg).Should().BeFalse();
         msg.Should().Contain(nameof(FailInstantiatingJob));
+        await Scheduler.StopAsync();
     }
 
     [Fact]
@@ -59,6 +60,8 @@ public class SchedulerTest : SchedulerTestBase
         job.Should().NotBeNull();
 
         (await Scheduler.JobExistsAsync(job.Key)).Should().BeTrue();
+
+        await Scheduler.StopAsync();
     }
 
     [Fact]
@@ -84,6 +87,7 @@ public class SchedulerTest : SchedulerTestBase
         await tcs.Task;
 
         jobEx.Should().NotBeNull();
+        await Scheduler.StopAsync();
     }
 
     [Fact]
@@ -112,6 +116,8 @@ public class SchedulerTest : SchedulerTestBase
         jobs.Where(job => job.Key.StartsWith("multi-test-job-"))
             .Should()
             .HaveCount(0, $"we removed all jobs with {nameof(Scheduler.DeleteJobAsync)} method.");
+
+        await Scheduler.StopAsync();
     }
 
     [Fact]
@@ -140,6 +146,7 @@ public class SchedulerTest : SchedulerTestBase
         jobDetail = await Scheduler.GetJobAsync(jobDetail.Key);
 
         jobDetail.CronExpression.Should().BeEquivalentTo(updatedCronExpression, "we updated the expression.");
+        await Scheduler.StopAsync();
     }
 
     [Fact]
@@ -167,6 +174,7 @@ public class SchedulerTest : SchedulerTestBase
         await Scheduler.TriggerJobAsync(job.Key);
         await tcs.Task;
         jobException.Should().NotBeNull();
+        await Scheduler.StopAsync();
     }
 
 
@@ -196,13 +204,15 @@ public class SchedulerTest : SchedulerTestBase
         await Scheduler.ResumeJobAsync(job.Key);
         await tcsStarted.Task;
         job = await Scheduler.GetJobAsync(job.Key);
-        job.TriggerState.Should().Be(JobTriggerState.Blocked);
+        job.TriggerState.Should().Be(JobTriggerState.Running);
+        job.IsRunning.Should().BeTrue();
         await tcs.Task;
         // Wait for Quartz to update JobDataMap
         await Task.Delay(500);
         job = await Scheduler.GetJobAsync(job.Key);
         // ThreeSecondDelayJob should run for 3 sec
         job.PreviousRunDuration.Should().BeGreaterThan(TimeSpan.FromSeconds(2));
-        job.TriggerState.Should().Be(JobTriggerState.Blocked);
+        job.TriggerState.Should().Be(JobTriggerState.Running);
+        await Scheduler.StopAsync();
     }
 }

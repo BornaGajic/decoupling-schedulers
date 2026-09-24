@@ -19,10 +19,6 @@ public interface IJobContext : IJobMetadata
 }
 ```
 
-```cs
-public interface IJobAdapter;
-```
-
 ## Adapter
 
 The idea is to isolate `Quartz.NET` dependencies in one place (DLL) and use your interfaces in other places in the app. This way, you become decoupled from the implementation, and you don't need to worry about who is actually implementing them.
@@ -30,135 +26,194 @@ The idea is to isolate `Quartz.NET` dependencies in one place (DLL) and use your
 This will be our adapter:
 
 ```cs
-[DisallowConcurrentExecution]
-public class QuartzJobAdapter<TJob> : IJobAdapter, Quartz.IJob
+internal class QuartzJobAdapter<TJob> : Quartz.IJob
     where TJob : IJob
 {
     private readonly TJob _job;
+    private readonly ILogger _logger;
 
-    [ActivatorUtilitiesConstructor]
-    public QuartzJobAdapter(TJob job)
+    public QuartzJobAdapter(TJob job, ILogger<QuartzJobAdapter<TJob>> logger)
     {
         _job = job;
+        _logger = logger;
     }
 
-    public async Task Execute(IJobExecutionContext context)
+    public async ValueTask Execute(IJobExecutionContext context, CancellationToken cancellationToken = default)
     {
+        ExceptionDispatchInfo edi = null;
+
+        var jobData = JobData.From(context.JobDetail.JobDataMap);
+        var jobDisplayName = JobHeaderAttribute.KeyFor<TJob>();
+
+        _logger.LogInformation("{JobName} ({JobType}) - Starting...", jobDisplayName, typeof(TJob).Name);
+
         try
         {
             await _job.Execute(new JobContext
             {
-                CancellationToken = context.CancellationToken,
+                CancellationToken = cancellationToken,
                 NextFireTimeUtc = context.NextFireTimeUtc,
                 PreviousFireTimeUtc = context.PreviousFireTimeUtc
             });
         }
         catch (Exception ex)
         {
-            throw new JobExecutionException(ex);
+            _logger.LogError(ex, "Error occured in {JobName} ({JobType})", jobDisplayName, typeof(TJob).Name);
+            edi = ExceptionDispatchInfo.Capture(ex);
+            jobData = jobData with { LastError = ex.Message };
         }
+        finally
+        {
+            jobData = jobData with
+            {
+                Duration = DateTime.UtcNow - context.FireTimeUtc,
+                LastRunUtc = context.FireTimeUtc.UtcDateTime,
+            };
+            jobData.PopulateJobDataMap(context.JobDetail.JobDataMap);
+        }
+        _logger.LogInformation("{JobName} ({JobType}) - Finished in {JobRunTime}", jobDisplayName, typeof(TJob).Name, context.JobRunTime);
+
+        edi?.Throw();
     }
 }
 ```
 
 We want to be able to create our own concrete `IJob` and call its `Execute` method inside Quartz.NET's `Execute` method.
 
-* `[DisallowConcurrentExecution]` is added here if you don't want to have multiple executions for the same `JobKey`.
-* `[ActivatorUtilitiesConstructor]` will be used by the `ActivatorUtilities` later on.
+* Quartz.NET hands the cancellation token to `Execute` as a parameter; we pass it on through our own `JobContext`.
+* The outcome of each run (`LastError`, `Duration`, `LastRunUtc`) is written back to the job's `JobDataMap`, so it survives between runs.
+* The exception is captured with `ExceptionDispatchInfo` and rethrown at the end, so Quartz.NET still sees the failure (with the original stack trace).
+* Concurrent executions of the same `JobKey` are prevented on the job detail itself (`JobBuilder.DisallowConcurrentExecution(true)` in `QuartzScheduler`), so the adapter needs no attributes.
 
 ## Job factory
 
 The next step would be to implement a custom job factory capable of creating both our `IJob` and `Quartz.IJob` instances.
 
 ```cs
-public class QuartzJobFactory : PropertySettingJobFactory
+internal class QuartzJobFactory : IJobFactory
 {
+    private readonly ILogger _logger;
     private readonly IServiceProvider _serviceProvider;
-    private readonly JobActivatorCache activatorCache = new();
 
-    public QuartzJobFactory(IServiceProvider serviceProvider) => _serviceProvider = serviceProvider;
-
-    // Omitted for brevity:
-    // public override void ReturnJob(Quartz.IJob job);
-    // public override void SetObjectProperties(object obj, JobDataMap data);
-    // private sealed class ScopedJob : Quartz.IJob, IDisposable
-    // ** Link to the code at the end of the blog post :) **
-
-    protected override Quartz.IJob InstantiateJob(TriggerFiredBundle bundle, Quartz.IScheduler scheduler)
+    public QuartzJobFactory(IServiceProvider serviceProvider, ILogger<QuartzJobFactory> logger)
     {
-        var serviceScope = _serviceProvider.CreateScope();
-        var (innerJob, flag) = CreateJob(bundle, serviceScope.ServiceProvider);
-        return new ScopedJob(serviceScope, innerJob, !flag);
+        _logger = logger;
+        _serviceProvider = serviceProvider;
     }
 
-    private (Quartz.IJob Job, bool FromContainer) CreateJob(TriggerFiredBundle bundle, IServiceProvider serviceProvider)
+    public ValueTask<JobScope> CreateJob(TriggerFiredBundle bundle, Quartz.IScheduler scheduler, CancellationToken cancellationToken = default)
     {
-        var innerJobType = bundle.JobDetail.JobType.GetGenericArguments().SingleOrDefault();
+        var scope = _serviceProvider.CreateScope();
+
+        try
+        {
+            // The DI scope rides along as the JobScope state and is handed back in ReturnJob.
+            return ValueTask.FromResult(new JobScope(CreateJob(bundle, scope), scope));
+        }
+        catch (Exception ex)
+        {
+            scope.Dispose();
+            _logger.LogError(ex, "Error creating job '{JobType}'.", bundle.JobDetail.JobType);
+            throw;
+        }
+    }
+
+    public ValueTask ReturnJob(JobScope jobScope, CancellationToken cancellationToken = default)
+    {
+        (jobScope.State as IServiceScope)?.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private static Quartz.IJob CreateJob(TriggerFiredBundle bundle, IServiceScope scope)
+    {
+        var frameworkJobInterface = typeof(IJob);
+        var jobType = bundle.JobDetail.JobType.Type;
+        var innerJobType = jobType.GetGenericArguments().SingleOrDefault();
 
         if (
-            (innerJobType?.IsAssignableTo(typeof(IJob)) ?? false)
-            && !serviceProvider.GetRequiredService<IServiceProviderIsService>().IsService(innerJobType)
+            (innerJobType?.IsAssignableTo(frameworkJobInterface) ?? false)
+            && !scope.ServiceProvider.GetRequiredService<IServiceProviderIsService>().IsService(innerJobType)
         )
         {
-            throw new Exception($"Register all {nameof(IJob)} implementations directly, i.e. they should be resolvable through service provider.");
-        }
-        else if (
-            !bundle.JobDetail.JobType.IsAssignableTo(typeof(IJobAdapter))
-            && serviceProvider.GetService(bundle.JobDetail.JobType) is Quartz.IJob quartzJob
-        )
-        {
-            return (quartzJob, true);
+            throw new Exception($"Please register all {nameof(IJob)} implementations with the service provider (DI).");
         }
 
-        return (activatorCache.CreateInstance(serviceProvider, bundle.JobDetail.JobType), false);
+        return (Quartz.IJob)ActivatorUtilities.CreateInstance(scope.ServiceProvider, jobType);
     }
 }
 ```
 
-Let's delve into some generic coding. `InstantiateJob` is called by `Quartz.NET` so we have to override that method. This implementation utilizes `Microsoft.DependencyInjection` but can be adapted for use with various other frameworks (Autofac, DryIoc...).
+Let's delve into some generic coding. `CreateJob` and `ReturnJob` are called by `Quartz.NET` around every execution. This implementation utilizes `Microsoft.DependencyInjection` but can be adapted for use with various other frameworks (Autofac, DryIoc...).
 
-* `InstantiateJob`
+* `CreateJob` (public)
   - We need to create a scope - why? This way we can control the disposition of activated services.
-  - The `ReturnJob` method disposes `IJob`, this action will dispose of everything created within our scope.
+  - The scope travels with the job as the `JobScope` state, so there is no bookkeeping on our side.
+  - If the job can't be created, the scope is disposed right away and the error is logged before rethrowing.
 
-* `CreateJob`
+* `ReturnJob`
+  - Quartz.NET hands the `JobScope` back once the execution is over; disposing the scope disposes everything created within it.
+
+* `CreateJob` (private)
   - The initial step involves checking for a generic type argument, `SingleOrDefault` can be replaced by something else, depending on your implementation.
   - `innerJobType` should be our concrete `IJob`, but a check is performed just to be sure, as one could register a `Quartz.NET` job directly.
   - Note the use of `IServiceProviderIsService` (Microsoft, what is this naming? 😶). This interface exposes a method that checks whether or not our `IServiceProvider` can resolve the given type. [Read more about it here](https://github.com/dotnet/runtime/issues/53919).
-  - If everything is alright, we will either resolve a `Quartz.IJob` or our job adapter through the `activatorCache`.
+  - If everything is alright, the job adapter is created with `ActivatorUtilities`.
+
+`ActivatorUtilities` is a great tool (you can find more information [here](https://onthedrift.com/posts/activator-utilities/)). Essentially, this utility offers methods used for object creation and dependency injection in a more flexible and customizable way, providing a sophisticated alternative to using `Activator` directly. `ActivatorUtilities.CreateInstance` instantiates a type whose constructor arguments come from the `IServiceProvider` - here, our concrete `IJob` and a logger.
+
+## Registration
+
+Everything Quartz.NET-specific is wired up in one extension method:
 
 ```cs
-internal sealed class JobActivatorCache
-{
-    private readonly ConcurrentDictionary<Type, ObjectFactory> activatorCache = new();
-
-    public Quartz.IJob CreateInstance(IServiceProvider serviceProvider, Type jobType)
-    {
-        ArgumentNullException.ThrowIfNull(serviceProvider);
-        ArgumentNullException.ThrowIfNull(jobType);
-
-        var orAdd = activatorCache.GetOrAdd(jobType, ActivatorUtilities.CreateFactory, Type.EmptyTypes);
-
-        return (Quartz.IJob)orAdd(serviceProvider, null);
-    }
-}
-```
-
-`JobActivatorCache` leverages a great tool called `ActivatorUtilities` (you can find more information [here](https://onthedrift.com/posts/activator-utilities/)). Essentially, this utility offers methods used for object creation and dependency injection in a more flexible and customizable way, providing a sophisticated alternative to using `Activator` directly. `ActivatorUtilities.CreateFactory` creates a delegate that instantiates a type with constructor arguments provided directly and/or from an `IServiceProvider`.
-
-```cs
-var services = new ServiceCollection();
 services.AddQuartz(cfg =>
 {
-    cfg.UseInMemoryStore();
+    if (settings.UsePersistentStore)
+    {
+        cfg.UsePersistentStore(st =>
+        {
+            st.ConfigureStore(opt =>
+            {
+                opt.StoreJobDataAsStrings = true;
+                opt.TablePrefix = "[Quartz].";
+                // The Quartz schema is provisioned externally (migration scripts); never let Quartz create it.
+                opt.SchemaProvisioning = SchemaProvisioning.Validate;
+            });
+            st.UseSystemTextJsonSerializer();
+            st.UseSqlServer(opt =>
+            {
+                opt.ConnectionString = settings.DbConnectionString;
+            });
+        });
+    }
+    else
+    {
+        cfg.UseInMemoryStore();
+    }
+
     cfg.UseJobFactory<QuartzJobFactory>();
     cfg.UseTimeZoneConverter();
 });
+
+services.TryAddSingleton(svc => svc.GetRequiredService<ISchedulerFactory>().GetScheduler().GetAwaiter().GetResult());
+services.TryAddSingleton<QuartzScheduler>();
+services.TryAddSingleton<Common.IScheduler>(svc => settings.Provider switch
+{
+    SchedulingProvider.Quartz => svc.GetRequiredService<QuartzScheduler>(),
+    _ => throw new Exception($"Unknown {nameof(SchedulingProvider)}")
+});
+```
+
+The rest of the app only sees this:
+
+```cs
+services.RegisterScheduler(configuration);
+services.AddTransient<TestJob>();
 ```
 
 * Ensure that you only reference your custom interfaces outside of the isolated DLL.
 * Remember to register concrete implementations directly (_e.g._ `AddTransient<TestJob>()`).
 
-The last step is to implement your custom `IScheduler`, write some tests, and we're done! If you wish to explore the full code example, the link is provided below.
+The last step is `QuartzScheduler`, our implementation of the custom `IScheduler` (see `Framework/Service/QuartzScheduler.cs`), plus some tests (`Framework.Test`), and we're done! The full code example is in this repository.
 
 Now, if you ever wish to change your implementation down the line, you can do so with considerably less effort!

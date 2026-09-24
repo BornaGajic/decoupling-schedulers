@@ -57,11 +57,16 @@ namespace Framework.Registration
                     {
                         cfg.UsePersistentStore(st =>
                         {
-                            st.UseProperties = true;
-                            st.UseNewtonsoftJsonSerializer();
+                            st.ConfigureStore(opt =>
+                            {
+                                opt.StoreJobDataAsStrings = true;
+                                opt.TablePrefix = "[Quartz].";
+                                // The Quartz schema is provisioned externally (migration scripts); never let Quartz create it.
+                                opt.SchemaProvisioning = SchemaProvisioning.Validate;
+                            });
+                            st.UseSystemTextJsonSerializer();
                             st.UseSqlServer(opt =>
                             {
-                                opt.TablePrefix = "[Quartz].";
                                 opt.ConnectionString = settings.DbConnectionString;
                             });
                         });

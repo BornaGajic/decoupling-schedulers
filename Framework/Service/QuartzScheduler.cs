@@ -3,7 +3,6 @@ using Framework.Model;
 using Framework.Settings;
 using Microsoft.Extensions.Options;
 using Quartz;
-using Quartz.Impl.Matchers;
 using System.Reflection;
 
 namespace Framework.Service;
@@ -29,7 +28,7 @@ internal class QuartzScheduler : Common.IScheduler
     public Task<JobDetail> AddJobAsync<TJob>(CancellationToken cancellationToken = default)
         where TJob : Common.IJob
     {
-        return AddJobAsync(typeof(TJob), string.Empty, cancellationToken);
+        return AddJobAsync<TJob>(string.Empty, cancellationToken);
     }
 
     public Task<JobDetail> AddJobAsync<TJob>(string cronExpression, CancellationToken cancellationToken = default)
@@ -67,18 +66,18 @@ internal class QuartzScheduler : Common.IScheduler
 
         var jobDetail = CreateJobDetail(jobType, key, additionalData);
 
-        if (!await _scheduler.CheckExists(jobDetail.Key, cancellationToken))
+        if (!await _scheduler.Exists(jobDetail.Key, cancellationToken))
         {
-            await _scheduler.AddJob(jobDetail, false, true, cancellationToken);
+            await _scheduler.AddJob(jobDetail, new AddJobOptions { Replace = false, StoreNonDurableWhileAwaitingScheduling = true }, cancellationToken);
 
             var attr = jobType.GetCustomAttribute<JobHeaderAttribute>();
             var cron = cronExpression ?? attr.CronExpression;
 
             if (!string.IsNullOrEmpty(cron))
             {
-                CronExpression.ValidateExpression(cron);
+                CronExpression.Parse(cron);
                 var trigger = CreateTrigger(jobDetail.Key, cron);
-                await _scheduler.ScheduleJob(trigger, cancellationToken);
+                await _scheduler.ScheduleJob(trigger, cancellationToken: cancellationToken);
                 await _scheduler.PauseJob(jobDetail.Key, cancellationToken);
             }
         }
@@ -88,48 +87,66 @@ internal class QuartzScheduler : Common.IScheduler
             foreach (var entry in existingJobDetail.JobDataMap)
                 jobDetail.JobDataMap[entry.Key] = entry.Value;
 
-            await _scheduler.AddJob(jobDetail, true, cancellationToken);
+            await _scheduler.AddJob(jobDetail, AddJobOptions.Replacing, cancellationToken);
         }
 
-        return await GetJobAsync(jobDetail.Key);
+        return await GetJobAsync(jobDetail.Key, cancellationToken);
     }
 
     // Cancellation only works for in-process jobs (if they're running on a another host they should be canceled there).
     public Task CancelJobAsync(string key, CancellationToken cancellationToken = default)
-        => _scheduler.Interrupt(JobKey.Create(key), cancellationToken);
+        => _scheduler.Interrupt(new JobKey(key), cancellationToken).AsTask();
 
     public Task<bool> DeleteJobAsync(string key, CancellationToken cancellationToken = default)
-        => _scheduler.DeleteJob(JobKey.Create(key), cancellationToken);
+        => _scheduler.DeleteJob(new JobKey(key), cancellationToken).AsTask();
 
-    public async Task<JobDetail> GetJobAsync(string key, CancellationToken cancellationToken = default)
-    {
-        return await GetJobAsync(JobKey.Create(key), cancellationToken);
-    }
+    public Task<JobDetail> GetJobAsync(string key, CancellationToken cancellationToken = default)
+        => GetJobAsync(new JobKey(key), cancellationToken);
 
+    /// <summary>
+    /// Loads every job in a fixed number of round trips (keys, details, triggers, trigger states, executing firings)
+    /// rather than several per job.
+    /// </summary>
     public async Task<IEnumerable<JobDetail>> GetJobsAsync(CancellationToken cancellationToken = default)
     {
-        var jobDetails = new List<JobDetail>();
+        var jobKeys = await _scheduler.GetJobKeys(GroupMatcher<JobKey>.AnyGroup(), cancellationToken);
 
-        foreach (var jobKey in await _scheduler.GetJobKeys(GroupMatcher<JobKey>.AnyGroup(), cancellationToken))
-        {
-            jobDetails.Add(await GetJobAsync(jobKey, cancellationToken));
-        }
+        if (jobKeys.Count == 0)
+            return [];
 
-        return jobDetails;
+        var jobDetails = await _scheduler.GetJobDetails(jobKeys, cancellationToken);
+        var triggers = (await _scheduler.GetTriggers(jobKeys.Select(GetTriggerKey).ToList(), cancellationToken))
+            .ToDictionary(t => t.Key);
+        var triggerStates = (await _scheduler.QueryTriggers(new TriggerQuery { Take = PagedQuery.All }, cancellationToken)).Items
+            .ToDictionary(t => t.Key, t => t.State);
+        var executingJobs = await GetRealCurrentlyExecutingJobs(cancellationToken);
+
+        return jobDetails
+            .Select(jd =>
+            {
+                var triggerKey = GetTriggerKey(jd.Key);
+                return ToJobDetail(
+                    jd,
+                    triggers.GetValueOrDefault(triggerKey),
+                    triggerStates.TryGetValue(triggerKey, out var state) ? state : TriggerState.None,
+                    executingJobs
+                );
+            })
+            .ToList();
     }
 
-    public bool IsValidCronExpression(string cronExpression) => CronExpression.IsValidExpression(cronExpression);
+    public bool IsValidCronExpression(string cronExpression) => CronExpression.TryParse(cronExpression, out _);
 
-    public Task<bool> JobExistsAsync(string key, CancellationToken cancellationToken = default) => _scheduler.CheckExists(JobKey.Create(key), cancellationToken);
+    public Task<bool> JobExistsAsync(string key, CancellationToken cancellationToken = default) => _scheduler.Exists(new JobKey(key), cancellationToken).AsTask();
 
     public async Task PauseJobAsync(string key, CancellationToken cancellationToken = default)
     {
-        await _scheduler.PauseJob(JobKey.Create(key), cancellationToken);
+        await _scheduler.PauseJob(new JobKey(key), cancellationToken);
     }
 
     public async Task ResumeJobAsync(string key, CancellationToken cancellationToken = default)
     {
-        var jobKey = JobKey.Create(key);
+        var jobKey = new JobKey(key);
         var jobTrigger = await _scheduler.GetTrigger(GetTriggerKey(jobKey), cancellationToken);
 
         // A job with a cleared schedule has no trigger to resume; it can only be executed manually.
@@ -148,7 +165,9 @@ internal class QuartzScheduler : Common.IScheduler
 
     public async ValueTask StartAsync(CancellationToken cancellationToken = default)
     {
-        if (!_scheduler.IsStarted)
+        // Created is the only status a scheduler has before its first Start (3.x's !IsStarted).
+        // GetStatus, not Status: a persistent-store scheduler is built asynchronously and the property throws until it is.
+        if (await _scheduler.GetStatus(cancellationToken) is SchedulerStatus.Created)
         {
             _scheduler.ListenerManager.AddJobListener(_jobListener);
             _scheduler.ListenerManager.AddSchedulerListener(_schedulerListener);
@@ -158,17 +177,17 @@ internal class QuartzScheduler : Common.IScheduler
 
     public async ValueTask StopAsync(CancellationToken cancellationToken = default)
     {
-        if (!_scheduler.IsShutdown)
+        if (await _scheduler.GetStatus(cancellationToken) is not (SchedulerStatus.ShuttingDown or SchedulerStatus.Shutdown))
         {
-            _scheduler.ListenerManager.RemoveSchedulerListener(_schedulerListener);
+            _scheduler.ListenerManager.RemoveSchedulerListener(_schedulerListener.Name);
             _scheduler.ListenerManager.RemoveJobListener(_jobListener.Name);
-            await _scheduler.Shutdown(cancellationToken);
+            await _scheduler.Shutdown(false, cancellationToken);
         }
     }
 
     public async Task TriggerJobAsync(string key, CancellationToken cancellationToken = default)
     {
-        await _scheduler.TriggerJob(JobKey.Create(key), cancellationToken);
+        await _scheduler.TriggerJob(new JobKey(key), cancellationToken: cancellationToken);
     }
 
     public async Task<bool> UnscheduleJobAsync(string key, CancellationToken cancellationToken = default)
@@ -177,7 +196,7 @@ internal class QuartzScheduler : Common.IScheduler
 
         // The job is stored durably, so dropping its trigger leaves it registered with no schedule -
         // the same state a job is in before a cron is ever assigned.
-        var jobKey = JobKey.Create(key);
+        var jobKey = new JobKey(key);
         return await _scheduler.UnscheduleJob(GetTriggerKey(jobKey), cancellationToken);
     }
 
@@ -186,7 +205,7 @@ internal class QuartzScheduler : Common.IScheduler
         ArgumentException.ThrowIfNullOrWhiteSpace(key);
         ArgumentException.ThrowIfNullOrWhiteSpace(cronExpression);
 
-        var jobKey = JobKey.Create(key);
+        var jobKey = new JobKey(key);
         var trigger = await _scheduler.GetTrigger(GetTriggerKey(jobKey), cancellationToken);
 
         if (trigger is ITrigger jobTrigger)
@@ -198,6 +217,8 @@ internal class QuartzScheduler : Common.IScheduler
                 .WithCronSchedule(cronExpression, cron =>
                 {
                     cron.InTimeZone(_settings.TimeZone);
+                    // Must match CreateTrigger; a fresh cron schedule otherwise defaults to SmartPolicy (fire missed run now).
+                    cron.WithMisfireInstruction(CronTriggerMisfireInstruction.DoNothing);
                 })
                 .Build();
 
@@ -211,7 +232,7 @@ internal class QuartzScheduler : Common.IScheduler
         else
         {
             var newTrigger = CreateTrigger(jobKey, cronExpression);
-            await _scheduler.ScheduleJob(newTrigger, cancellationToken);
+            await _scheduler.ScheduleJob(newTrigger, cancellationToken: cancellationToken);
             await _scheduler.PauseTrigger(newTrigger.Key, cancellationToken);
         }
     }
@@ -221,11 +242,14 @@ internal class QuartzScheduler : Common.IScheduler
         var adapterType = typeof(QuartzJobAdapter<>).MakeGenericType([jobType]);
         var attr = jobType.GetCustomAttribute<JobHeaderAttribute>();
 
-        var jd = JobBuilder.Create(adapterType)
+        var jd = JobBuilder.Create()
+            .OfType(adapterType)
             .DisallowConcurrentExecution(true)
             .StoreDurably(true)
-            .PersistJobDataAfterExecution(true)
-            .SetJobData(jobData is null ? null : new JobDataMap((System.Collections.IDictionary)jobData));
+            .PersistJobDataAfterExecution(true);
+
+        if (jobData is not null)
+            jd = jd.UsingJobData(new JobDataMap(jobData.ToDictionary(e => e.Key, e => (object)e.Value)));
 
         if (!string.IsNullOrEmpty(attr?.Description))
             jd = jd.WithDescription(attr.Description);
@@ -248,7 +272,7 @@ internal class QuartzScheduler : Common.IScheduler
             builder.WithCronSchedule(cronExpression, cron =>
             {
                 cron.InTimeZone(_settings.TimeZone);
-                cron.WithMisfireHandlingInstructionDoNothing();
+                cron.WithMisfireInstruction(CronTriggerMisfireInstruction.DoNothing);
             });
         }
 
@@ -257,24 +281,30 @@ internal class QuartzScheduler : Common.IScheduler
 
     private async Task<JobDetail> GetJobAsync(JobKey jobKey, CancellationToken cancellationToken = default)
     {
-        if (!await _scheduler.CheckExists(jobKey, cancellationToken))
+        var jobDetail = await _scheduler.GetJobDetail(jobKey, cancellationToken);
+        if (jobDetail is null)
             return null;
 
         var trigger = await _scheduler.GetTrigger(GetTriggerKey(jobKey), cancellationToken);
         var triggerState = trigger is not null ? await _scheduler.GetTriggerState(trigger.Key, cancellationToken) : TriggerState.None;
 
-        var jobDetail = await _scheduler.GetJobDetail(jobKey, cancellationToken);
-        var jobData = JobData.From(jobDetail.JobDataMap);
-
         var executingJobs = await GetRealCurrentlyExecutingJobs(cancellationToken);
+
+        return ToJobDetail(jobDetail, trigger, triggerState, executingJobs);
+    }
+
+    private static JobDetail ToJobDetail(IJobDetail jobDetail, ITrigger trigger, TriggerState triggerState, IReadOnlyCollection<JobKey> executingJobs)
+    {
+        var jobKey = jobDetail.Key;
+        var jobData = JobData.From(jobDetail.JobDataMap);
 
         return new JobDetail
         {
             Key = jobKey.Name,
             Description = jobDetail.Description,
             CronExpression = trigger is ICronTrigger cronTrigger ? cronTrigger.CronExpressionString : null,
-            PreviousFireTimeUtc = jobData?.LastRunUtc ?? trigger?.GetPreviousFireTimeUtc(),
-            NextFireTimeUtc = trigger?.GetNextFireTimeUtc(),
+            PreviousFireTimeUtc = jobData?.LastRunUtc ?? trigger?.PreviousFireTimeUtc,
+            NextFireTimeUtc = trigger?.NextFireTimeUtc,
             IsRecurring = trigger?.FinalFireTimeUtc is null,
             IsRunning = executingJobs.Any(k => k.Name.Equals(jobKey.Name)),
             TriggerState = triggerState switch
@@ -285,6 +315,7 @@ internal class QuartzScheduler : Common.IScheduler
                 TriggerState.None => JobTriggerState.None,
                 TriggerState.Blocked => JobTriggerState.Blocked,
                 TriggerState.Error => JobTriggerState.Error,
+                TriggerState.Executing => JobTriggerState.Running,
                 _ => throw new NotSupportedException(),
             },
             Name = jobData?.Name,
@@ -295,23 +326,14 @@ internal class QuartzScheduler : Common.IScheduler
         };
     }
 
-    private Task<JobDetail> GetJobAsync(JobKey jobKey) => GetJobAsync(jobKey.Name);
-
+    /// <remarks>
+    /// Read from the job store, so with the persistent store this covers every process sharing the database,
+    /// not just jobs running in this process.
+    /// </remarks>
     private async Task<List<JobKey>> GetRealCurrentlyExecutingJobs(CancellationToken cancellationToken = default)
     {
-        // Commented out; "out of scope"
-        //if (_settings.UsePersistentStore)
-        //{
-        //    // JobKey, query for real currently executing jobs as GetCurrentlyExecutingJobs only returns in-process jobs.
-        //    const string query = @"
-        //        SELECT distinct [JOB_NAME] as [Name], [JOB_GROUP] as [Group]
-        //        FROM [Quartz].[FIRED_TRIGGERS] WITH (NOLOCK)
-        //        WHERE [STATE] = 'EXECUTING'
-        //    ";
-        //}
-
-        var jobs = await _scheduler.GetCurrentlyExecutingJobs(cancellationToken);
-        return jobs.Select(x => x.JobDetail.Key).ToList();
+        var firings = await _scheduler.QueryFireInstances(new FireInstanceQuery { State = FireInstanceState.Executing, Take = PagedQuery.All }, cancellationToken);
+        return firings.Items.Select(x => x.JobKey).Distinct().ToList();
     }
 
     private Task OnJobExecution(SchedulerEventArgs args) => JobExecution?.Invoke(args);

@@ -30,5 +30,10 @@ public enum JobTriggerState
     /// <summary>
     /// Indicates that the trigger does not exist.
     /// </summary>
-    None
+    None,
+
+    /// <summary>
+    /// At least one execution started by the trigger is currently running.
+    /// </summary>
+    Running
 }

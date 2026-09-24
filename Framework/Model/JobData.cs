@@ -15,7 +15,10 @@ internal record JobData
         if (map is null)
             return null;
 
-        map.TryGetTimeSpanValueFromString(nameof(Duration), out var duration);
+        // Missing or blank reads as TimeSpan.Zero, as Quartz 3's TryGetTimeSpanValueFromString did.
+        var duration = map.TryGetString(nameof(Duration), out var durationText) && TimeSpan.TryParse(durationText, out var parsed)
+            ? parsed
+            : TimeSpan.Zero;
 
         return new JobData
         {
