@@ -1,5 +1,3 @@
-Out-of-date code below, but the concept still applies the same.
-
 # Intro
 Here's a motivation for today's blog post: you have a very large application and you have a NuGet package referenced all around the project. One day, the only library contributor decides it's time to stop. What you are left with is an unmaintained library, and a ton of scheduled code refactoring (pun intended). This scenario is rather uncommon, but nevertheless it's a good practice to decouple from any concrete implementations.
 
